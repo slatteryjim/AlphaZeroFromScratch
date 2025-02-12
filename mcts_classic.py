@@ -115,8 +115,9 @@ class MCTS:
 
             # Traverse the tree until a node that is not fully expanded is found
             while node.is_fully_expanded():
-                node = node.select()
+                node = node.select() # Select the best child node (UCB score)
 
+            # Determine the value of the node
             value, is_terminal = self.game.get_value_and_terminated(node.state, node.action_taken)
             value = self.game.get_opponent_value(value)
 
@@ -132,3 +133,17 @@ class MCTS:
             action_probs[child.action_taken] = child.visit_count
         action_probs /= np.sum(action_probs)
         return action_probs
+    
+    def ensemble_searches(self, state, num_searches):
+        """
+        Runs multiple MCTS searches in parallel and averages the action probabilities.
+        """
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor() as executor:
+            futures = [executor.submit(self.search, state) for _ in range(num_searches)]
+            results = [future.result() for future in futures]
+
+        # Average the action probabilities from all searches
+        avg_action_probs = np.mean(results, axis=0)
+        return avg_action_probs

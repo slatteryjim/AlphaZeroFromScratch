@@ -34,6 +34,18 @@ class TicTacToe:
         )
 
     def get_value_and_terminated(self, state, action):
+        """
+        Determines the value and termination status of a game state after a given action.
+
+        Args:
+            state (np.ndarray): The current state of the game board.
+            action (int): The action to be evaluated.
+
+        Returns:
+            tuple: A tuple containing:
+                - int: The value of the state (1 if the action results in a win, 0 otherwise).
+                - bool: True if the game is terminated (either win or draw), False otherwise.
+        """
         if self.check_win(state, action):
             return 1, True
         if np.sum(self.get_valid_moves(state)) == 0:
