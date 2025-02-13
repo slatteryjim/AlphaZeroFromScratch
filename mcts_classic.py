@@ -97,12 +97,18 @@ class Node:
             self.parent.backpropagate(value)
 
 class MCTS:
-    def __init__(self, game, args):
+    def __init__(self, game, args,
+                 add_dirichlet_noise=True,
+                 dirichlet_epsilon=0.25,
+                 dirichlet_alpha=0.03):
         """
         Initializes the Monte Carlo Tree Search (MCTS) algorithm.
         """
         self.game = game
         self.args = args
+        self.add_dirichlet_noise = add_dirichlet_noise
+        self.dirichlet_epsilon   = dirichlet_epsilon
+        self.dirichlet_alpha     = dirichlet_alpha
 
     def search(self, state):
         """
@@ -115,7 +121,7 @@ class MCTS:
 
             # Traverse the tree until a node that is not fully expanded is found
             while node.is_fully_expanded():
-                node = node.select() # Select the best child node (UCB score)
+                node = node.select()  # Select the best child node (UCB score)
 
             # Determine the value of the node
             value, is_terminal = self.game.get_value_and_terminated(node.state, node.action_taken)
@@ -131,18 +137,36 @@ class MCTS:
         action_probs = np.zeros(self.game.action_size)
         for child in root.children:
             action_probs[child.action_taken] = child.visit_count
-        action_probs /= np.sum(action_probs)
+        
+        # Add Dirichlet noise to the root node's action probabilities
+        if self.add_dirichlet_noise:
+            # Get noise parameters with defaults (e.g., epsilon=0.25, alpha=0.03)
+            epsilon = self.dirichlet_epsilon
+            alpha   = self.dirichlet_alpha
+            
+            # Identify valid moves at the root
+            valid_moves = self.game.get_valid_moves(state)
+            valid_indices = np.where(valid_moves == 1)[0]
+            if len(valid_indices) > 0:
+                # Generate Dirichlet noise over valid moves
+                noise = np.random.dirichlet([alpha] * len(valid_indices))
+                # Mix the visit counts with the noise
+                for i, move in enumerate(valid_indices):
+                    action_probs[move] = (1 - epsilon) * action_probs[move] + epsilon * noise[i]
+        
+        # Normalize the action probabilities
+        total = np.sum(action_probs)
+        if total > 0:
+            action_probs /= total
         return action_probs
     
     def ensemble_searches(self, state, num_searches):
         """
-        Runs multiple MCTS searches in parallel and averages the action probabilities.
+        Runs multiple MCTS searches sequentially and averages the action probabilities.
         """
-        from concurrent.futures import ThreadPoolExecutor
 
-        with ThreadPoolExecutor() as executor:
-            futures = [executor.submit(self.search, state) for _ in range(num_searches)]
-            results = [future.result() for future in futures]
+        # Run multiple MCTS searches sequentially and average the action probabilities
+        results = [self.search(state) for _ in range(num_searches)]
 
         # Average the action probabilities from all searches
         avg_action_probs = np.mean(results, axis=0)
