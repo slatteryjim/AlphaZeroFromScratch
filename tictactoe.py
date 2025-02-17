@@ -60,3 +60,14 @@ class TicTacToe:
 
     def change_perspective(self, state, player):
         return state * player
+
+    def get_encoded_state(self, state):
+        """
+        Encodes the 2D game state into a binary representation suitable for neural network input:
+        a 3D binary tensor with shape (3, height, width).
+        """
+        return np.stack((
+            state == -1, # all squares where player -1 has played
+            state == 0,  # all empty squares
+            state == 1   # all squares where player 1 has played
+        )).astype(np.float32)
