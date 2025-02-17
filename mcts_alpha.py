@@ -1,8 +1,9 @@
 import numpy as np
 import math
+import torch
 
 class Node:
-    def __init__(self, game, args, state, parent=None, action_taken=None):
+    def __init__(self, game, args, state, parent=None, action_taken=None, prior=0):
         """
         Initializes a node in the MCTS tree.
         """
@@ -11,19 +12,19 @@ class Node:
         self.state = state
         self.parent = parent
         self.action_taken = action_taken
+        self.prior = prior
         
         self.children = []  # List to store child nodes
-        self.expandable_moves = game.get_valid_moves(state)  # List of valid moves that can still be expanded
         
         self.visit_count = 0
         self.value_sum = 0  # Tracks cumulative value of the node
 
     def is_fully_expanded(self):
         """
-        Returns True if all valid moves have been expanded and there are children.
+        Returns True if there are children.
         """
-        return np.sum(self.expandable_moves) == 0 and len(self.children) > 0
-
+        return len(self.children) > 0
+    
     def select(self):
         """
         Selects the child node with the highest UCB value.
@@ -42,48 +43,55 @@ class Node:
     def get_ucb(self, child):
         """
         Computes the Upper Confidence Bound (UCB) score for a child node.
+
+        The UCB score balances exploitation (using known good moves) with exploration (trying new moves).
+        It combines three terms:
+        1. Q-value: The average reward (converted from [-1,1] to [0,1] range)
+        2. Visit count ratio: Encourages exploration of less-visited nodes
+        3. Prior probability: The policy network's initial evaluation of the move
+
+        Args:
+            child (Node): The child node to compute the UCB score for
+
+        Returns:
+            float: The UCB score for the child node
+
+        Formula:
+            UCB = Q + C * sqrt(N) / (n + 1) * P
+            where:
+            Q = transformed average value 
+            C = exploration constant
+            N = parent visit count
+            n = child visit count
+            P = prior probability
         """
-        q_value = 1 - ((child.value_sum / child.visit_count) + 1) / 2
-        return q_value + self.args['C'] * math.sqrt(math.log(self.visit_count) / child.visit_count)
-
-    def expand(self):
+        if child.visit_count == 0:
+            q_value = 0
+        else:
+            # The average reward (convert from [-1,1] to [0,1] range)
+            q_value = 1 - ((child.value_sum / child.visit_count) + 1) / 2
+        return q_value + self.args['C'] * (math.sqrt(self.visit_count) / (child.visit_count + 1)) * child.prior
+    
+    def expand(self, policy):
         """
-        Expands the node by selecting an untried valid move and creating a new child node.
+        Expands the current node by creating child nodes for each valid action.
+        
+        Args:
+            policy (list): Probabilities for each action (0 for invalid actions).
         """
-        action = np.random.choice(np.where(self.expandable_moves == 1)[0])
-        self.expandable_moves[action] = 0  # Mark action as expanded
+        for action, prob in enumerate(policy):
+            # Only actions with probability > 0 are expanded
+            if prob > 0:
+                # copy current state and apply the action
+                child_state = self.state.copy()
+                child_state = self.game.get_next_state(child_state, action, 1)
+                # Perspective is changed to opponent's view (-1) for each child state
+                child_state = self.game.change_perspective(child_state, player=-1)
 
-        child_state = self.state.copy()
-        child_state = self.game.get_next_state(child_state, action, 1)
-        child_state = self.game.change_perspective(child_state, player=-1)
-
-        child = Node(self.game, self.args, child_state, self, action)
-        self.children.append(child)
-        return child
-
-    def simulate(self):
-        """
-        Runs a rollout simulation from the current state to estimate its value.
-        """
-        value, is_terminal = self.game.get_value_and_terminated(self.state, self.action_taken)
-        value = self.game.get_opponent_value(value)
-
-        if is_terminal:
-            return value
-
-        rollout_state = self.state.copy()
-        rollout_player = 1
-        while True:
-            valid_moves = self.game.get_valid_moves(rollout_state)
-            action = np.random.choice(np.where(valid_moves == 1)[0])
-            rollout_state = self.game.get_next_state(rollout_state, action, rollout_player)
-            value, is_terminal = self.game.get_value_and_terminated(rollout_state, action)
-            if is_terminal:
-                if rollout_player == -1:
-                    value = self.game.get_opponent_value(value)
-                return value    
-
-            rollout_player = self.game.get_opponent(rollout_player)
+                # add child node
+                self.children.append(
+                    Node(self.game, self.args, child_state, self, action, prob)
+                )
 
     def backpropagate(self, value):
         """
@@ -96,20 +104,17 @@ class Node:
         if self.parent is not None:
             self.parent.backpropagate(value)
 
+
 class MCTS:
-    def __init__(self, game, args,
-                 add_dirichlet_noise=True,
-                 dirichlet_epsilon=0.25,
-                 dirichlet_alpha=0.03):
+    def __init__(self, game, args, model):
         """
         Initializes the Monte Carlo Tree Search (MCTS) algorithm.
         """
         self.game = game
         self.args = args
-        self.add_dirichlet_noise = add_dirichlet_noise
-        self.dirichlet_epsilon   = dirichlet_epsilon
-        self.dirichlet_alpha     = dirichlet_alpha
+        self.model = model
 
+    @torch.no_grad()
     def search(self, state):
         """
         Runs MCTS search and returns action probabilities for the root state.
@@ -128,36 +133,24 @@ class MCTS:
             value = self.game.get_opponent_value(value)
 
             if not is_terminal:
-                node = node.expand()
-                value = node.simulate()
-
-            node.backpropagate(value)    
-
-        # Compute action probabilities based on visit counts of child nodes
+                policy, value = self.model(
+                    torch.tensor(self.game.get_encoded_state(node.state)).unsqueeze(0)
+                )
+                policy = torch.softmax(policy, axis=1).squeeze(0).cpu().numpy()
+                valid_moves = self.game.get_valid_moves(node.state)
+                policy *= valid_moves
+                policy /= np.sum(policy)
+                
+                value = value.item()
+                
+                node.expand(policy)
+                
+            node.backpropagate(value)
+            
         action_probs = np.zeros(self.game.action_size)
         for child in root.children:
             action_probs[child.action_taken] = child.visit_count
-        
-        # Add Dirichlet noise to the root node's action probabilities
-        if self.add_dirichlet_noise:
-            # Get noise parameters with defaults (e.g., epsilon=0.25, alpha=0.03)
-            epsilon = self.dirichlet_epsilon
-            alpha   = self.dirichlet_alpha
-            
-            # Identify valid moves at the root
-            valid_moves = self.game.get_valid_moves(state)
-            valid_indices = np.where(valid_moves == 1)[0]
-            if len(valid_indices) > 0:
-                # Generate Dirichlet noise over valid moves
-                noise = np.random.dirichlet([alpha] * len(valid_indices))
-                # Mix the visit counts with the noise
-                for i, move in enumerate(valid_indices):
-                    action_probs[move] = (1 - epsilon) * action_probs[move] + epsilon * noise[i]
-        
-        # Normalize the action probabilities
-        total = np.sum(action_probs)
-        if total > 0:
-            action_probs /= total
+        action_probs /= np.sum(action_probs)
         return action_probs
     
     def ensemble_searches(self, state, num_searches):
