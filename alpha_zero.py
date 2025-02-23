@@ -1,5 +1,7 @@
+import random
 import numpy as np
 import torch
+import torch.nn.functional as F
 from tqdm import trange
 from mcts_classic import MCTS
 from datetime import datetime
@@ -62,9 +64,32 @@ class AlphaZero:
     
     def train(self, memory):
         """
-        Trains the neural network on stored game memory.
+        Trains the neural network using a batch of self-play
+        data generated during the selfPlay phase.
         """
-        pass
+        random.shuffle(memory)
+        for batchIdx in range(0, len(memory), self.args['batch_size']):
+            sample = memory[batchIdx:min(len(memory) - 1, batchIdx + self.args['batch_size'])] # Change to memory[batchIdx:batchIdx+self.args['batch_size']] in case of an error
+            state, policy_targets, value_targets = zip(*sample)
+            
+            state          = np.array(state)
+            policy_targets = np.array(policy_targets)
+            value_targets  = np.array(value_targets).reshape(-1, 1)
+            
+            state          = torch.tensor(state, dtype=torch.float32)
+            policy_targets = torch.tensor(policy_targets, dtype=torch.float32)
+            value_targets  = torch.tensor(value_targets,  dtype=torch.float32)
+            
+            # Forward pass
+            out_policy, out_value = self.model(state)
+            
+            policy_loss = F.cross_entropy(out_policy, policy_targets)
+            value_loss  = F.mse_loss(out_value, value_targets)
+            loss = policy_loss + value_loss
+            
+            self.optimizer.zero_grad() 
+            loss.backward()
+            self.optimizer.step()
     
     def learn(self):
         """
